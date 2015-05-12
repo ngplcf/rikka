@@ -1,10 +1,13 @@
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Exception.Base
+import Data.Map.Strict
 import Control.Monad
 import Network.Socket
 import System.Environment
 import System.IO
+
+import Rikka.Data
 
 main :: IO ()
 main = do
@@ -20,7 +23,9 @@ main = do
 
         chanIds <- newChan :: IO (Chan ThreadId)
         varNum <- newMVar 0 :: IO (MVar Int)
-        closeChan <- newChan :: IO (Chan String)
+
+        world <- newTVarIO voidWorld :: IO (TVar World)
+        running <- newTVarIO 0 :: IO (TVar Int)
 
         listenId <- forkIO $ forever $ do
                 (csock, caddr) <- accept sock
@@ -29,42 +34,74 @@ main = do
                 handle <- socketToHandle csock ReadWriteMode
                 hSetBuffering handle LineBuffering
 
-                handleID <- forkIO $ catch (handleConnection handle)
-                    (\e -> do
-                        if e == ThreadKilled then do
-                            hPutStrLn handle "server is shutting down"
-                            writeChan closeChan $ "closed " ++ show caddr
-                        else
-                            hPutStrLn handle "unexpected error"
-                        hClose handle
-                    )
+                handleID <- forkIO $ do
+                    atomically $
+                        modifyTVar' running (\x -> x+1)
+                    catch (handleConnection handle world)
+                        (\e -> do
+                            if e == ThreadKilled then do
+                                hPutStrLn handle "server is shutting down"
+                            else
+                                hPutStrLn handle "unexpected error"
+                            hClose handle
+                        )
+                    atomically $ 
+                        modifyTVar' running (\x -> x-1)
 
                 writeChan chanIds handleID
                 modifyMVar_ varNum (\x -> return (x+1))
 
 
-        doCommands chanIds varNum closeChan listenId
+        doCommands chanIds varNum listenId
         close sock
+        -- wait for threads
+        atomically $ do
+            alive <- readTVar running
+            check (alive == 0)
 
-handleConnection :: Handle -> IO ()
-handleConnection handle = do
-    eof <- hIsEOF handle
-    if eof then
-        putStrLn "client disconnected"
-    else
-        hGetLine handle >>= hPutStrLn handle >> handleConnection handle
+handleConnection :: Handle -> TVar World -> IO ()
+handleConnection handle world = do
+    nick <- hGetLine handle
+    pass <- hGetLine handle
 
-doCommands :: (Chan ThreadId) -> (MVar Int) -> (Chan String) -> ThreadId -> IO ()
-doCommands chanIds varNum chanClose listenId = do
+    user <- atomically $ do
+        w <- readTVar world
+        if member nick (users w) then
+            if pass == (password $ (users w) ! nick) then
+                return $ Just $ (users w) ! nick
+            else
+                return Nothing
+        else do
+            let user = User nick pass
+            modifyTVar' world (addUser user)
+            return $ Just user
+
+    case user of
+        Nothing ->
+            hPutStrLn handle "wrong password" >> hClose handle
+        Just _  -> do
+            hPutStrLn handle "logged in"
+            handleConnection' handle world user
+
+    where
+        handleConnection' handle world user = do
+            eof <- hIsEOF handle
+            if eof then
+                putStrLn "client disconnected"
+            else
+                hGetLine handle >>= hPutStrLn handle >> handleConnection' handle world user
+
+doCommands :: (Chan ThreadId) -> (MVar Int) -> ThreadId -> IO ()
+doCommands chanIds varNum listenId = do
     cmd <- getLine
     case cmd of
         "quit"      -> do
             killThread listenId
-            readMVar varNum >>= killall chanIds chanClose
+            readMVar varNum >>= killall chanIds 
         _           -> do
             putStrLn "unknown command"
-            doCommands chanIds varNum chanClose listenId
+            doCommands chanIds varNum listenId
     where
-        killall _ _ 0 = return ()
-        killall chan cchan n = 
-            readChan chan >>= killThread >> readChan cchan >>= putStrLn >> killall chan cchan (n-1)
+        killall _ 0 = return ()
+        killall chan n = 
+            readChan chan >>= killThread >> killall chan (n-1)
