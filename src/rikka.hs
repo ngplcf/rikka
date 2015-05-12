@@ -9,10 +9,10 @@ import System.IO
 main :: IO ()
 main = do
     args <- getArgs
-    if length args /= 1 then 
-        putStrLn "./rikka [port number]"
+    if length args /= 2 then 
+        putStrLn "./rikka [addres to listen on] [port number]"
     else do
-        addr <- getAddrInfo Nothing (Just "127.0.0.1") (Just $ head args) >>= 
+        addr <- getAddrInfo Nothing (Just $ head args) (Just $ last args) >>= 
             (\addrs -> return $ head addrs)
         sock <- socket AF_INET Stream defaultProtocol
         bind sock (addrAddress addr)
@@ -20,6 +20,7 @@ main = do
 
         chanIds <- newChan :: IO (Chan ThreadId)
         varNum <- newMVar 0 :: IO (MVar Int)
+        closeChan <- newChan :: IO (Chan String)
 
         listenId <- forkIO $ forever $ do
                 (csock, caddr) <- accept sock
@@ -30,8 +31,9 @@ main = do
 
                 handleID <- forkIO $ catch (handleConnection handle)
                     (\e -> do
-                        if e == ThreadKilled then
+                        if e == ThreadKilled then do
                             hPutStrLn handle "server is shutting down"
+                            writeChan closeChan $ "closed " ++ show caddr
                         else
                             hPutStrLn handle "unexpected error"
                         hClose handle
@@ -41,7 +43,7 @@ main = do
                 modifyMVar_ varNum (\x -> return (x+1))
 
 
-        doCommands chanIds varNum listenId
+        doCommands chanIds varNum closeChan listenId
         close sock
 
 handleConnection :: Handle -> IO ()
@@ -52,17 +54,17 @@ handleConnection handle = do
     else
         hGetLine handle >>= hPutStrLn handle >> handleConnection handle
 
-doCommands :: (Chan ThreadId) -> (MVar Int) -> ThreadId -> IO ()
-doCommands chanIds varNum listenId = do
+doCommands :: (Chan ThreadId) -> (MVar Int) -> (Chan String) -> ThreadId -> IO ()
+doCommands chanIds varNum chanClose listenId = do
     cmd <- getLine
     case cmd of
         "quit"      -> do
             killThread listenId
-            readMVar varNum >>= killall chanIds
+            readMVar varNum >>= killall chanIds chanClose
         _           -> do
             putStrLn "unknown command"
-            doCommands chanIds varNum listenId
+            doCommands chanIds varNum chanClose listenId
     where
-        killall chan 0 = return ()
-        killall chan n = 
-            readChan chan >>= killThread >> killall chan (n-1)
+        killall _ _ 0 = return ()
+        killall chan cchan n = 
+            readChan chan >>= killThread >> readChan cchan >>= putStrLn >> killall chan cchan (n-1)
