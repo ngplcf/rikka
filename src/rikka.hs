@@ -10,7 +10,7 @@ main :: IO ()
 main = do
     args <- getArgs
     if length args /= 2 then 
-        putStrLn "./rikka [addres to listen on] [port number]"
+        putStrLn "./rikka [address to listen on] [port number]"
     else do
         addr <- getAddrInfo Nothing (Just $ head args) (Just $ last args) >>= 
             (\addrs -> return $ head addrs)
